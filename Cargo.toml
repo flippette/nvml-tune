@@ -1,0 +1,17 @@
+[package]
+name = "nvml-tune"
+version = "0.1.0"
+edition = "2021"
+authors = ["flippette <quangdatle2006@outlook.com>"]
+license = "Unlicense"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+color-eyre = "0.6"
+env_logger = "0.10"
+eyre = "0.6"
+log = "0.4"
+nvml-wrapper-sys = { git = "https://github.com/Cldfire/nvml-wrapper.git", rev = "1d71e81" }
+owo-colors = "3.5"
+pretty_env_logger = "0.5"
+sudo = "0.6"
