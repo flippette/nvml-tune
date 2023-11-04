@@ -46,16 +46,16 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(mem_clock) = args.mem_clock {
-        match unsafe { lib.nvmlDeviceSetMemClkVfOffset(*device, mem_clock as i32 * 2) } {
+    if let Some(mem_clock) = args.mclk_offset {
+        match unsafe { lib.nvmlDeviceSetMemClkVfOffset(*device, mem_clock * 2) } {
             0 => info!("set memory clock offset to +{mem_clock}MHz!"),
             val => error!("failed to set memory clock offset! (error {val})"),
         }
     }
 
-    if let Some(gfx_clock) = args.gfx_clock {
-        match unsafe { lib.nvmlDeviceSetGpuLockedClocks(*device, gfx_clock, gfx_clock) } {
-            0 => info!("set graphics clock to {gfx_clock}MHz!"),
+    if let Some(gfx_clock) = args.gclk_offset {
+        match unsafe { lib.nvmlDeviceSetGpcClkVfOffset(*device, gfx_clock) } {
+            0 => info!("set graphics clock offset to +{gfx_clock}MHz!"),
             val => error!("failed to set graphics clock! (error = {val})"),
         }
     }
@@ -81,15 +81,19 @@ fn log_fmt(fmt: &mut Formatter, rec: &Record) -> io::Result<()> {
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// the index of the gpu
     #[arg(short, long, default_value_t = 0)]
     index: u32,
 
+    /// tdp in watts
     #[arg(short, long)]
     tdp: Option<u32>,
 
-    #[arg(short, long)]
-    mem_clock: Option<u32>,
+    /// memory clock offset in mhz, can be negative
+    #[arg(short, long, allow_negative_numbers = true)]
+    mclk_offset: Option<i32>,
 
-    #[arg(short, long)]
-    gfx_clock: Option<u32>,
+    /// graphics clock offset in mhz, can be negative
+    #[arg(short, long, allow_negative_numbers = true)]
+    gclk_offset: Option<i32>,
 }
