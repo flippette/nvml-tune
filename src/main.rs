@@ -1,24 +1,45 @@
 use clap::Parser;
-use env_logger::fmt::Formatter;
 use eyre::{bail, ensure, eyre, Result};
-use log::{error, info, Level, LevelFilter, Record};
 use nvml_wrapper_sys::bindings::*;
-use owo_colors::{AnsiColors, OwoColorize};
 use std::{
     alloc::{alloc, Layout},
-    io::{self, Write},
+    fs::File,
+    io,
+    path::PathBuf,
 };
+use sudo::RunningAs;
+use tracing::{error, info, Level};
+use tracing_subscriber::{prelude::*, EnvFilter};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
-    pretty_env_logger::formatted_builder()
-        .filter_level(LevelFilter::Info)
-        .parse_default_env()
-        .format(log_fmt)
-        .init();
-    sudo::escalate_if_needed().map_err(|_| eyre!("failed to elevate privileges!"))?;
 
     let args = Args::parse();
+
+    let filter_layer = EnvFilter::builder()
+        .with_default_directive(Level::INFO.into())
+        .from_env_lossy();
+    let format_layer = tracing_subscriber::fmt::layer()
+        .with_writer(io::stderr)
+        .without_time();
+    let logfile = match sudo::check() {
+        RunningAs::User => File::create(args.logfile)?,
+        _ => File::options()
+            .write(true)
+            .truncate(true)
+            .open(args.logfile)?,
+    };
+    let logfile_layer = tracing_subscriber::fmt::layer()
+        .with_writer(logfile)
+        .without_time()
+        .json();
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(format_layer)
+        .with(logfile_layer)
+        .init();
+
+    sudo::escalate_if_needed().map_err(|_| eyre!("failed to elevate privileges!"))?;
 
     let lib = unsafe { NvmlLib::new("libnvidia-ml.so")? };
     info!("loaded nvml!");
@@ -34,7 +55,7 @@ fn main() -> Result<()> {
     match unsafe { lib.nvmlDeviceGetHandleByIndex_v2(args.index, device) } {
         0 => info!("got device at index {}! (addr = {device:p})", args.index),
         val => bail!(
-            "failed to get device at index {}! (error {val})",
+            "failed to get device at index {}! (error = {val})",
             args.index
         ),
     }
@@ -49,7 +70,7 @@ fn main() -> Result<()> {
     if let Some(mem_clock) = args.mclk_offset {
         match unsafe { lib.nvmlDeviceSetMemClkVfOffset(*device, mem_clock * 2) } {
             0 => info!("set memory clock offset to +{mem_clock}MHz!"),
-            val => error!("failed to set memory clock offset! (error {val})"),
+            val => error!("failed to set memory clock offset! (error = {val})"),
         }
     }
 
@@ -62,27 +83,12 @@ fn main() -> Result<()> {
 
     if let Some(fan_speed) = args.fan_speed {
         match unsafe { lib.nvmlDeviceSetFanSpeed_v2(*device, 0, fan_speed) } {
-            0 => info!("set fan speed to {fan_speed}RPM!"),
+            0 => info!("set fan speed to {fan_speed}%!"),
             val => error!("failed to set fan speed! (error = {val})"),
         }
     }
 
     Ok(())
-}
-
-fn log_fmt(fmt: &mut Formatter, rec: &Record) -> io::Result<()> {
-    writeln!(
-        fmt,
-        "{} > {}",
-        rec.target().bold().color(match rec.level() {
-            Level::Trace => AnsiColors::White,
-            Level::Debug => AnsiColors::Cyan,
-            Level::Info => AnsiColors::Green,
-            Level::Warn => AnsiColors::Yellow,
-            Level::Error => AnsiColors::Red,
-        }),
-        rec.args()
-    )
 }
 
 #[derive(Debug, Parser)]
@@ -104,7 +110,11 @@ struct Args {
     #[arg(short, long, allow_negative_numbers = true)]
     gclk_offset: Option<i32>,
 
-    /// fan speed in rpm
+    /// fan speed in %
     #[arg(short, long)]
     fan_speed: Option<u32>,
+
+    /// logfile location
+    #[arg(short, long, default_value = "nvml-tune.log")]
+    logfile: PathBuf,
 }
