@@ -223,5 +223,9 @@ fn parse_fan_curve(i: &str) -> Result<Vec<(u32, u32)>, clap::Error> {
     }
     curve.sort_by_key(|(temp, _)| *temp);
 
+    if curve[0].0 != 0 {
+        curve.insert(0, (0, 0));
+    }
+
     Ok(curve)
 }
