@@ -227,5 +227,9 @@ fn parse_fan_curve(i: &str) -> Result<Vec<(u32, u32)>, clap::Error> {
         curve.insert(0, (0, 0));
     }
 
+    if curve.last().is_some_and(|(temp, _)| *temp < 100) {
+        curve.push((100, 100));
+    }
+
     Ok(curve)
 }
