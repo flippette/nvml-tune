@@ -1,11 +1,15 @@
 use clap::Parser;
 use eyre::{bail, ensure, eyre, Result};
+use nom::IResult;
 use nvml_wrapper_sys::bindings::*;
 use std::{
     alloc::{alloc, Layout},
     fs::File,
     io,
     path::PathBuf,
+    sync::mpsc,
+    thread,
+    time::Duration,
 };
 use sudo::RunningAs;
 use tracing::{error, info, Level};
@@ -81,11 +85,54 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(fan_speed) = args.fan_speed {
-        match unsafe { lib.nvmlDeviceSetFanSpeed_v2(*device, 0, fan_speed) } {
-            0 => info!("set fan speed to {fan_speed}%!"),
-            val => error!("failed to set fan speed! (error = {val})"),
+    if let Some(fan_curve) = args.fan_curve {
+        let (tx, rx) = mpsc::channel();
+        ctrlc::set_handler(move || tx.send(()).unwrap())?;
+
+        if fan_curve.len() == 1 && fan_curve[0].0 > 0 {
+            error!("single point fan curve must have a 0c point!");
+        } else {
+            loop {
+                if let Ok(()) = rx.try_recv() {
+                    break;
+                }
+
+                let mut temp = 0;
+                match unsafe { lib.nvmlDeviceGetTemperature(*device, 0, &mut temp) } {
+                    0 => info!("read current temperature! ({temp}c)"),
+                    val => error!("failed to read current temperature! (error = {val})"),
+                }
+
+                // find neighboring keypoints
+                let ((temp_pre, duty_pre), (temp_post, duty_post)) = match &fan_curve[..] {
+                    [point] => (*point, (100, 100)),
+                    points => points
+                        .windows(2)
+                        .find(|window| window[0].0 < temp && window[1].0 > temp)
+                        .map(|window| (window[0], window[1]))
+                        .unwrap_or(((0, 0), (100, 100))),
+                };
+
+                info!(
+                    "curve segment: ({}c, {}%) -> ({}c, {}%)",
+                    temp_pre, duty_pre, temp_post, duty_post,
+                );
+
+                let slope = (duty_post + duty_pre) as f64 / (temp_post + temp_pre) as f64;
+                info!("slope: {slope}");
+                let duty = (temp as f64 * slope) as u32;
+                match unsafe { lib.nvmlDeviceSetFanSpeed_v2(*device, 0, duty) } {
+                    0 => info!("set fan duty to {duty}%!"),
+                    val => error!("failed to set fan duty! (error = {val})"),
+                }
+
+                thread::sleep(Duration::from_secs(args.fan_update_duration));
+            }
         }
+    }
+
+    unsafe {
+        lib.nvmlShutdown();
     }
 
     Ok(())
@@ -98,23 +145,83 @@ struct Args {
     #[arg(short, long, default_value_t = 0)]
     index: u32,
 
-    /// tdp in watts
-    #[arg(short, long)]
+    /// tdp
+    #[arg(short, long, value_name = "W")]
     tdp: Option<u32>,
 
-    /// memory clock offset in mhz, can be negative
-    #[arg(short, long, allow_negative_numbers = true)]
+    /// memory clock offset, can be negative
+    #[arg(short, long, value_name = "MHZ", allow_negative_numbers = true)]
     mclk_offset: Option<i32>,
 
-    /// graphics clock offset in mhz, can be negative
-    #[arg(short, long, allow_negative_numbers = true)]
+    /// graphics clock offset, can be negative
+    #[arg(short, long, value_name = "MHZ", allow_negative_numbers = true)]
     gclk_offset: Option<i32>,
 
-    /// fan speed in %
-    #[arg(short, long)]
-    fan_speed: Option<u32>,
+    /// fan speed curve in comma-separated (temp:duty) pairs
+    #[arg(short = 'c', long, value_name = "(CEL:PERCENT),", value_parser = parse_fan_curve)]
+    fan_curve: Option<std::vec::Vec<(u32, u32)>>, // see clap issue #4481
+
+    /// how long to sleep in between fan speed changes
+    #[arg(short = 'r', long, value_name = "(SECS)", default_value_t = 2)]
+    fan_update_duration: u64,
 
     /// logfile location
     #[arg(short, long, default_value = "nvml-tune.log")]
     logfile: PathBuf,
+}
+
+fn parse_fan_curve(i: &str) -> Result<Vec<(u32, u32)>, clap::Error> {
+    use nom::{branch::*, bytes::complete::*, sequence::*};
+
+    fn parse_pair(i: &str) -> IResult<&str, (u32, u32)> {
+        let (i, _) = tag("(")(i)?;
+        let (i, (temp, duty)) = separated_pair(
+            take_while(|c: char| c.is_ascii_digit()),
+            tag(":"),
+            take_while(|c: char| c.is_ascii_digit()),
+        )(i)?;
+        let (i, _) = tag(")")(i)?;
+
+        let temp = temp.parse::<u32>().unwrap();
+        if temp > 100 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Digit,
+            )));
+        }
+        let duty = duty.parse::<u32>().unwrap();
+        if duty > 100 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                i,
+                nom::error::ErrorKind::Digit,
+            )));
+        }
+
+        Ok((i, (temp, duty)))
+    }
+
+    let mut curve = Vec::new();
+    let mut i = i;
+
+    while let Ok((i_next, point)) = alt((terminated(parse_pair, tag(",")), parse_pair))(i) {
+        i = i_next;
+
+        if let Some(idx) = curve.iter().position(|(temp, _)| *temp == point.0) {
+            if point.1 < curve[idx].1 {
+                continue;
+            }
+            curve.remove(idx);
+        }
+        curve.push(point);
+    }
+
+    if curve.is_empty() {
+        return Err(clap::Error::raw(
+            clap::error::ErrorKind::InvalidValue,
+            "fan curve must not be empty!",
+        ));
+    }
+    curve.sort_by_key(|(temp, _)| *temp);
+
+    Ok(curve)
 }

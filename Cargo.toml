@@ -8,7 +8,9 @@ license = "Unlicense"
 [dependencies]
 clap = { version = "4.4", features = ["derive"] }
 color-eyre = "0.6"
+ctrlc = "3.4"
 eyre = "0.6"
+nom = "7.1"
 nvml-wrapper-sys = { git = "https://github.com/Cldfire/nvml-wrapper.git", rev = "1d71e81" }
 sudo = "0.6"
 tracing = "0.1"
