@@ -60,6 +60,13 @@ fn main() -> Result<()> {
         }
     }
 
+    if let Some(fan_speed) = args.fan_speed {
+        match unsafe { lib.nvmlDeviceSetFanSpeed_v2(*device, 0, fan_speed) } {
+            0 => info!("set fan speed to {fan_speed}RPM!"),
+            val => error!("failed to set fan speed! (error = {val})"),
+        }
+    }
+
     Ok(())
 }
 
@@ -96,4 +103,8 @@ struct Args {
     /// graphics clock offset in mhz, can be negative
     #[arg(short, long, allow_negative_numbers = true)]
     gclk_offset: Option<i32>,
+
+    /// fan speed in rpm
+    #[arg(short, long)]
+    fan_speed: Option<u32>,
 }
