@@ -1,16 +1,8 @@
 use clap::Parser;
-use eyre::{bail, ensure, eyre, Result};
+use eyre::{bail, eyre, Result};
 use nom::IResult;
 use nvml_wrapper_sys::bindings::*;
-use std::{
-    alloc::{alloc, Layout},
-    fs::File,
-    io,
-    path::PathBuf,
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{fs::File, io, mem::MaybeUninit, path::PathBuf, sync::mpsc, thread, time::Duration};
 use sudo::RunningAs;
 use tracing::{error, info, Level};
 use tracing_subscriber::{prelude::*, EnvFilter};
@@ -53,33 +45,32 @@ fn main() -> Result<()> {
         val => bail!("failed to initialize nvml! (error {val})"),
     }
 
-    let layout = Layout::new::<nvmlDevice_t>();
-    ensure!(layout.size() > 0, "nvmlDevice_t is zero-sized!");
-    let device = unsafe { alloc(layout) } as *mut nvmlDevice_t;
-    match unsafe { lib.nvmlDeviceGetHandleByIndex_v2(args.index, device) } {
-        0 => info!("got device at index {}! (addr = {device:p})", args.index),
+    let mut device = MaybeUninit::uninit();
+    match unsafe { lib.nvmlDeviceGetHandleByIndex_v2(args.index, device.as_mut_ptr()) } {
+        0 => info!("got device at index {}! (addr = {:p})", args.index, &device),
         val => bail!(
             "failed to get device at index {}! (error = {val})",
             args.index
         ),
     }
+    let device = unsafe { device.assume_init() };
 
     if let Some(tdp) = args.tdp {
-        match unsafe { lib.nvmlDeviceSetPowerManagementLimit(*device, tdp * 1000) } {
+        match unsafe { lib.nvmlDeviceSetPowerManagementLimit(device, tdp * 1000) } {
             0 => info!("set tdp to {tdp}W!"),
             val => error!("failed to set tdp! (error = {val})"),
         }
     }
 
     if let Some(mem_clock) = args.mclk_offset {
-        match unsafe { lib.nvmlDeviceSetMemClkVfOffset(*device, mem_clock * 2) } {
+        match unsafe { lib.nvmlDeviceSetMemClkVfOffset(device, mem_clock * 2) } {
             0 => info!("set memory clock offset to +{mem_clock}MHz!"),
             val => error!("failed to set memory clock offset! (error = {val})"),
         }
     }
 
     if let Some(gfx_clock) = args.gclk_offset {
-        match unsafe { lib.nvmlDeviceSetGpcClkVfOffset(*device, gfx_clock) } {
+        match unsafe { lib.nvmlDeviceSetGpcClkVfOffset(device, gfx_clock) } {
             0 => info!("set graphics clock offset to +{gfx_clock}MHz!"),
             val => error!("failed to set graphics clock! (error = {val})"),
         }
@@ -98,7 +89,7 @@ fn main() -> Result<()> {
                 }
 
                 let mut temp = 0;
-                match unsafe { lib.nvmlDeviceGetTemperature(*device, 0, &mut temp) } {
+                match unsafe { lib.nvmlDeviceGetTemperature(device, 0, &mut temp) } {
                     0 => info!("read current temperature! ({temp}c)"),
                     val => error!("failed to read current temperature! (error = {val})"),
                 }
@@ -113,15 +104,9 @@ fn main() -> Result<()> {
                         .unwrap_or(((0, 0), (100, 100))),
                 };
 
-                info!(
-                    "curve segment: ({}c, {}%) -> ({}c, {}%)",
-                    temp_pre, duty_pre, temp_post, duty_post,
-                );
-
                 let slope = (duty_post + duty_pre) as f64 / (temp_post + temp_pre) as f64;
-                info!("slope: {slope}");
                 let duty = (temp as f64 * slope) as u32;
-                match unsafe { lib.nvmlDeviceSetFanSpeed_v2(*device, 0, duty) } {
+                match unsafe { lib.nvmlDeviceSetFanSpeed_v2(device, 0, duty) } {
                     0 => info!("set fan duty to {duty}%!"),
                     val => error!("failed to set fan duty! (error = {val})"),
                 }
